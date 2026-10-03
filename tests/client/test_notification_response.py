@@ -6,6 +6,7 @@ that don't follow SDK conventions.
 
 import json
 
+import anyio
 import httpx2
 import mcp_types as types
 import pytest
@@ -238,6 +239,30 @@ async def test_client_surfaces_jsonrpc_error_from_non_2xx_body_with_correlated_i
                 with pytest.raises(MCPError) as exc:
                     await session.list_tools()
                 assert exc.value.error.code == types.METHOD_NOT_FOUND
+
+
+async def test_client_surfaces_jsonrpc_error_from_200_json_body_with_correlated_id() -> None:
+    """SDK-defined: a JSON-RPC error with ``id: null`` in a 200 ``application/json`` body is
+    correlated under the pending request's id, so the awaiting call raises the server's error
+    instead of waiting forever for a response the session cannot match."""
+
+    async def handle_mcp_request(request: Request) -> Response:
+        data = json.loads(await request.body())
+        if data.get("method") == "initialize":
+            return _init_json_response(data)
+        if "id" not in data:
+            return Response(status_code=202)
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": types.INTERNAL_ERROR, "message": "boom"}})
+
+    app = Starlette(debug=True, routes=[Route("/mcp", handle_mcp_request, methods=["POST"])])
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app)) as client:
+        async with streamable_http_client("http://localhost/mcp", http_client=client) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:  # pragma: no branch
+                await session.initialize()
+                with anyio.fail_after(5), pytest.raises(MCPError) as exc:
+                    await session.list_tools()
+                assert exc.value.error.code == types.INTERNAL_ERROR
+                assert exc.value.error.message == "boom"
 
 
 async def test_client_falls_back_to_generic_error_when_non_2xx_body_is_a_jsonrpc_result() -> None:

@@ -456,6 +456,10 @@ class StreamableHTTPTransport:
         try:
             content = await response.aread()
             message = jsonrpc_message_adapter.validate_json(content, by_name=False)
+            if isinstance(message, JSONRPCError):
+                # The server may have set `id: null` (request rejected before its
+                # id was parsed); use this request's id so correlation works.
+                message.id = request_id
             session_message = SessionMessage(message)
             await read_stream_writer.send(session_message)
         except (httpx2.StreamError, ValidationError) as exc:
